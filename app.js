@@ -9,21 +9,11 @@ import {
 // than one image, one is picked at random each time the gesture is newly
 // (re)triggered, so repeated gestures don't always show the same frame.
 const GESTURE_MEMES = {
-  rockstar: ["memes/cat.jpg"],
-  default: ["memes/pokercat.jpg"],
-  oneFingerUp: ["memes/profcat.jpg", "memes/professorcat.jpg"],
-  fist: ["memes/punchcat.jpg"],
-  shhh: ["memes/shhcat.jpg"],
-  twoFingersTogether: [
-    "memes/uwucat.jpg",
-    "memes/uwucatt.jpg",
-    "memes/fingers together muehehe .jpg",
-  ],
-  handCoverFace: ["memes/hand cover face .jpg"],
-  crashOutCat: ["memes/crashout cat .jpg"],
-  twoHandsOnHead: ["memes/two hands on head .jpg"],
-  handStretchedOut: ["memes/hand stretched out, palm facing up .jpg"],
-  sideEyeCat: ["memes/side eye cat.jpg"],
+  default: ["memes/momonga_default.jpg"],
+  huhCat: ["memes/momonga_huhcat.jpg"],
+  sideEyeCat: ["memes/momonga_side.jpg"],
+  sideEyeDownCat: ["memes/momonga_down.jpg"],
+  fist: ["memes/momonga_fist.jpg"],
 };
 
 // how many consecutive frames a gesture must hold before we switch to it
@@ -40,13 +30,14 @@ const FACE_STALE_MS = 1200;
 // your head to find the right value for you.
 const SIDE_EYE_YAW_DEG = 15.0;
 
-// hand-covering-face: how close the hand needs to be to where the mouth
-// last was. Wider when the face detector has fully lost the face (strong
-// evidence of a real occlusion); tighter when the face is still partially
-// tracked (weaker evidence, avoid false positives from a hand just passing
-// near the face).
-const HAND_COVER_FACE_DIST_FACE_LOST = 1.3;
-const HAND_COVER_FACE_DIST_FACE_SEEN = 0.7;
+// same idea, but for tilting the head DOWN (pitch) instead of turning it
+// sideways (yaw) - "slight side eye" when you look down.
+const SIDE_EYE_DOWN_PITCH_DEG = 12.0;
+
+// huh cat: mouth open AND eyes wide, via MediaPipe's face blendshapes
+// (jawOpen / eyeWideLeft / eyeWideRight) rather than hand-rolled geometry.
+const HUH_JAW_THRESHOLD = 0.03;
+const EYE_WIDE_THRESHOLD = 0.01;
 
 const video = document.getElementById("video");
 const memeImg = document.getElementById("memeImg");
@@ -59,8 +50,10 @@ let candidateGesture = "default";
 let candidateStreak = 0;
 let lastNonDefaultAt = performance.now();
 let lastFace = null; // { mouthCenter, faceWidth, mouthOpen, yawDeg, t }
-let lastFaceSeenThisFrame = false;
 let lastYawDebug = 0;
+let lastPitchDebug = 0;
+let lastJawOpen = 0;
+let lastEyeWide = 0;
 
 async function init() {
   const fileset = await FilesetResolver.forVisionTasks(
@@ -86,6 +79,7 @@ async function init() {
     runningMode: "VIDEO",
     numFaces: 1,
     outputFacialTransformationMatrixes: true,
+    outputFaceBlendshapes: true,
   });
 
   const stream = await navigator.mediaDevices.getUserMedia({
@@ -137,33 +131,32 @@ function yawFromTransformMatrix(matrixData) {
 }
 
 function classifyHand(lm) {
-  const handScale = dist(lm[0], lm[9]) || 1e-6; // wrist -> middle mcp
-
   const indexUp = fingerExtended(lm, 5, 6, 8);
   const middleUp = fingerExtended(lm, 9, 10, 12);
   const ringUp = fingerExtended(lm, 13, 14, 16);
   const pinkyUp = fingerExtended(lm, 17, 18, 20);
-
-  // thumb + pinky spread apart from each other = shaka/rock-on shape.
-  // tucked thumb sits close to the pinky-side of the palm; an abducted
-  // thumb sticks straight out and this distance grows a lot.
-  const thumbPinkySpread = dist(lm[4], lm[17]) / handScale;
-  const thumbOut = thumbPinkySpread > 1.05;
-
   const curledCount = [indexUp, middleUp, ringUp, pinkyUp].filter((v) => !v).length;
+  return { curledCount };
+}
 
-  return {
-    indexUp,
-    middleUp,
-    ringUp,
-    pinkyUp,
-    thumbOut,
-    curledCount,
-    handScale,
-    indexTip: lm[8],
-    wrist: lm[0],
-    palmCenter: lm[9],
-  };
+// extract the head's up/down tilt angle (pitch, degrees) from the same
+// transformation matrix as yaw above.
+function pitchFromTransformMatrix(matrixData) {
+  const r21 = matrixData[9];
+  const r22 = matrixData[10];
+  return (Math.atan2(r21, r22) * 180) / Math.PI;
+}
+
+// pull MediaPipe's face blendshapes into a plain {name: score} dict.
+function blendshapeScores(faceResult) {
+  if (!faceResult.faceBlendshapes || faceResult.faceBlendshapes.length === 0) return {};
+  const out = {};
+  for (const b of faceResult.faceBlendshapes[0].categories) out[b.categoryName] = b.score;
+  return out;
+}
+
+function eyeWideScore(scores) {
+  return Math.max(scores.eyeWideLeft || 0, scores.eyeWideRight || 0);
 }
 
 function updateFace(faceResult) {
@@ -187,20 +180,21 @@ function updateFace(faceResult) {
     const mouthOpen = dist(upperLip, lowerLip) / faceWidth;
 
     let yawDeg = 0;
+    let pitchDeg = 0;
     if (faceResult.facialTransformationMatrixes && faceResult.facialTransformationMatrixes.length > 0) {
-      yawDeg = yawFromTransformMatrix(faceResult.facialTransformationMatrixes[0].data);
+      const matrix = faceResult.facialTransformationMatrixes[0].data;
+      yawDeg = yawFromTransformMatrix(matrix);
+      pitchDeg = pitchFromTransformMatrix(matrix);
     }
 
     lastFace = { mouthCenter, faceWidth, mouthOpen, yawDeg, t: now };
     lastYawDebug = yawDeg;
-  }
-  lastFaceSeenThisFrame = sawFace;
-}
+    lastPitchDebug = pitchDeg;
 
-// a hand is "pointing" if only the index finger is extended (thumb can be
-// either way) - the shape both hands make in the finger-tips-touching pose.
-function isPointing(h) {
-  return h.indexUp && !h.middleUp && !h.ringUp && !h.pinkyUp;
+    const scores = blendshapeScores(faceResult);
+    lastJawOpen = scores.jawOpen || 0;
+    lastEyeWide = eyeWideScore(scores);
+  }
 }
 
 function decideGesture(handResult) {
@@ -208,97 +202,27 @@ function decideGesture(handResult) {
   const faceIsFresh = !!lastFace && now - lastFace.t < FACE_STALE_MS;
 
   if (!handResult.landmarks || handResult.landmarks.length === 0) {
-    // no hands: side-eye is a face-only pose (head turned, no particular
-    // hand shape needed).
+    // no hands: huh and side-eye are both face-only poses.
+    if (faceIsFresh && lastJawOpen > HUH_JAW_THRESHOLD && lastEyeWide > EYE_WIDE_THRESHOLD) {
+      return "huhCat";
+    }
     if (faceIsFresh && Math.abs(lastFace.yawDeg) > SIDE_EYE_YAW_DEG) {
       return "sideEyeCat";
+    }
+    if (faceIsFresh && lastPitchDebug > SIDE_EYE_DOWN_PITCH_DEG) {
+      return "sideEyeDownCat";
     }
     return "default";
   }
 
   const hands = handResult.landmarks.map(classifyHand);
 
-  if (hands.length === 2) {
-    // two fingers pointing together: both hands pointing with just the
-    // index finger, fingertips close to each other in the frame.
-    if (isPointing(hands[0]) && isPointing(hands[1])) {
-      const avgScale = (hands[0].handScale + hands[1].handScale) / 2;
-      const tipGap = dist(hands[0].indexTip, hands[1].indexTip) / avgScale;
-      if (tipGap < 1.4) {
-        return "twoFingersTogether";
-      }
-    }
-
-    // two hands up near the face: either both resting on top of the head,
-    // or both held up beside the cheeks (crash-out-cat, pencil-in-mouth
-    // pose). Use the face box, when we have one, to tell them apart by
-    // height; otherwise fall back to "both hands close together and above
-    // the wrists" as a rough "hands near face" signal.
-    if (faceIsFresh) {
-      const { mouthCenter, faceWidth } = lastFace;
-      const nearFace = hands.every(
-        (h) => dist(h.palmCenter, mouthCenter) / faceWidth < 2.2
-      );
-      if (nearFace) {
-        const headTopY = mouthCenter.y - faceWidth * 1.1;
-        const bothAboveHead = hands.every((h) => h.palmCenter.y < headTopY);
-        if (bothAboveHead) {
-          return "twoHandsOnHead";
-        }
-        return "crashOutCat";
-      }
-    }
-  }
-
-  const h = hands[0];
-
-  // 1. fist / punch: everything curled
-  if (h.curledCount === 4) {
+  if (hands.some((h) => h.curledCount === 4)) {
     return "fist";
   }
 
-  // 2. rockstar / shaka: thumb + pinky out, index/middle/ring curled
-  if (h.thumbOut && h.pinkyUp && !h.indexUp && !h.middleUp && !h.ringUp) {
-    return "rockstar";
-  }
-
-  // 3. shhh / one-finger-up: a single extended index finger is a very
-  // specific shape (shhh in particular = fingertip right on the mouth), so
-  // it must be checked before the broader hand-covering-face test below -
-  // otherwise a shhh pose (finger near the mouth) gets swallowed by the
-  // "any hand near the face" check.
-  if (h.indexUp && !h.middleUp && !h.ringUp && !h.pinkyUp) {
-    if (faceIsFresh) {
-      const d = dist(h.indexTip, lastFace.mouthCenter) / lastFace.faceWidth;
-      if (d < 0.55) {
-        return "shhh";
-      }
-    }
-    return "oneFingerUp";
-  }
-
-  // 4. hand covering face: the one hand we see sits roughly where the face
-  // last was. Wider tolerance if the face detector has fully lost the face
-  // (strong evidence of a real occlusion); tighter if it's still partially
-  // tracking through the fingers.
-  if (faceIsFresh) {
-    const d = dist(h.palmCenter, lastFace.mouthCenter) / lastFace.faceWidth;
-    const threshold = lastFaceSeenThisFrame
-      ? HAND_COVER_FACE_DIST_FACE_SEEN
-      : HAND_COVER_FACE_DIST_FACE_LOST;
-    if (d < threshold) {
-      return "handCoverFace";
-    }
-  }
-
-  // 5. open palm held out, not near the face: hand stretched out towards
-  // the camera, palm up.
-  if (h.curledCount === 0) {
-    return "handStretchedOut";
-  }
-
-  // hands are up but not making a specific shape - still allow a strong
-  // side-eye read to win over an ambiguous hand pose.
+  // hand up but not a fist - still allow a strong side-eye read to win
+  // over an ambiguous hand pose.
   if (faceIsFresh && Math.abs(lastFace.yawDeg) > SIDE_EYE_YAW_DEG) {
     return "sideEyeCat";
   }
@@ -356,7 +280,9 @@ function updateDebugHud() {
   if (!debugHud) return;
   debugHud.textContent =
     `gesture: ${currentGesture}\n` +
-    `yaw: ${lastYawDebug >= 0 ? "+" : ""}${lastYawDebug.toFixed(1)} deg  (side-eye thr +/-${SIDE_EYE_YAW_DEG.toFixed(1)})`;
+    `yaw: ${lastYawDebug >= 0 ? "+" : ""}${lastYawDebug.toFixed(1)} deg  (side-eye thr +/-${SIDE_EYE_YAW_DEG.toFixed(1)})\n` +
+    `pitch: ${lastPitchDebug >= 0 ? "+" : ""}${lastPitchDebug.toFixed(1)} deg  (side-eye-down thr ${SIDE_EYE_DOWN_PITCH_DEG.toFixed(1)})\n` +
+    `jawOpen: ${lastJawOpen.toFixed(2)}  eyeWide: ${lastEyeWide.toFixed(2)}  (huh needs both > ${HUH_JAW_THRESHOLD.toFixed(2)}/${EYE_WIDE_THRESHOLD.toFixed(2)})`;
 }
 
 init().catch((err) => console.error(err));

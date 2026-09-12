@@ -5,37 +5,22 @@ Opens two windows, side by side like the OBS/streamer setups:
   - "Camera": your webcam feed with hand landmarks drawn on top
   - "Meme": the cat meme matching whatever gesture you're making
 
-Gestures:
-  rockstar / shaka  -> memes/cat.jpg
-  default (no hand) -> memes/pokercat.jpg
-  one finger up     -> memes/profcat.jpg, memes/professorcat.jpg
-  fist / punch      -> memes/punchcat.jpg
-  shhh              -> memes/shhcat.jpg
-  two fingers together (both hands, tips touching) -> memes/uwucat.jpg, memes/uwucatt.jpg,
-                                                        memes/fingers together muehehe .jpg
-  hand covering face -> memes/hand cover face .jpg
-  crash-out cat (two CLENCHED FISTS up beside the face)   -> memes/crashout cat .jpg
-  two hands on head                                        -> memes/two hands on head .jpg
-  dance cat (two open palms, one near top of screen, one near bottom)  -> memes/two palms up.mov (video)
-  hand stretched out, palm facing camera (open hand)       -> memes/hand stretched out, palm facing up .jpg
-  side eye (head turned to the side)                       -> memes/side eye cat.jpg
-  slight side eye (head tilted DOWN, not turned)            -> memes/side eye.png
-  mouth wide open, WITH a hand visible somewhere in frame  -> memes/laugh and point .jpg
-  huh cat (mouth open AND eyes wide, no hands)               -> memes/huh.png
-  shrug cat (both hands up and out to the sides)             -> memes/iunno cat.jpg
-  spin cat (spinning fast in your chair)                   -> memes/spin cat.mov (plays as a video)
+Gestures (trimmed to 5 - momonga edition):
+  default (no hand, neutral face)               -> memes/momonga_default.jpg
+  huh cat (mouth open AND eyes wide, no hands)   -> memes/momonga_huhcat.jpg
+  side eye (head turned to the side)             -> memes/momonga_side.jpg
+  side eye down (head tilted DOWN, not turned)   -> memes/momonga_down.jpg
+  fist / punch                                   -> memes/momonga_fist.jpg
 
-Facial expressions (mouth-open above) use MediaPipe's face blendshapes -
+Facial expressions (huh cat above) use MediaPipe's face blendshapes -
 pre-computed expression scores (0-1) that come from the same face model,
-rather than hand-rolled landmark geometry. Several more scores are already
-being read and shown on the debug HUD (smile, brow-raise, wink) but not
-wired to a meme yet - see the "facial expression thresholds" section below
-to add more once you've picked images for them.
+rather than hand-rolled landmark geometry.
 
-The Camera window shows a live debug readout (head yaw, and optical-flow
-magnitude/coherence, vs. their trigger thresholds) in the top-left corner so
-side-eye and spin can both be tuned by eye - see SIDE_EYE_YAW_DEG and
-SPIN_FLOW_SCORE_THRESHOLD below.
+The Camera window shows a live debug readout (head yaw/pitch vs. their
+trigger thresholds) in the top-left corner so side-eye can be tuned by eye -
+see SIDE_EYE_YAW_DEG below. Spin/dance/optical-flow code below is unused
+dead weight now that those gestures are gone - left in in case you want them
+back, safe to delete otherwise.
 
 Press q or ESC to quit.
 """
@@ -62,26 +47,15 @@ MODELS = ROOT / "models"
 MEMES = ROOT / "memes"
 
 GESTURE_MEMES = {
-    "rockstar": ["cat.jpg"],
-    "default": ["pokercat.jpg"],
-    "oneFingerUp": ["profcat.jpg", "professorcat.jpg"],
-    "fist": ["punchcat.jpg"],
-    "shhh": ["shhcat.jpg"],
-    "twoFingersTogether": ["uwucat.jpg", "uwucatt.jpg", "fingers together muehehe .jpg"],
-    "handCoverFace": ["hand cover face .jpg"],
-    "crashOutCat": ["crashout cat .jpg"],
-    "twoHandsOnHead": ["two hands on head .jpg"],
-    "handStretchedOut": ["hand stretched out, palm facing up .jpg"],
-    "sideEyeCat": ["side eye cat.jpg"],
-    "sideEyeDownCat": ["side eye.png"],
-    "mouthOpenCat": ["laugh and point .jpg"],
-    "huhCat": ["huh.png"],
-    "danceCat": ["two palms up.mov"],
-    "spinCat": ["spin cat.mov"],
+    "default": ["momonga_default.jpg"],
+    "huhCat": ["momonga_huhcat.jpg"],
+    "sideEyeCat": ["momonga_side.jpg"],
+    "sideEyeDownCat": ["momonga_down.jpg"],
+    "fist": ["momonga_fist.jpg"],
 }
 
-# gestures whose meme is a video, not a still image
-VIDEO_GESTURES = {"spinCat", "danceCat"}
+# gestures whose meme is a video, not a still image - none left after the trim
+VIDEO_GESTURES = set()
 
 STABLE_FRAMES_REQUIRED = 5
 DEFAULT_FALLBACK_MS = 600
@@ -426,17 +400,8 @@ class GestureState:
         now = time.time() * 1000
         face_is_fresh = self.last_face is not None and now - self.last_face[4] < FACE_STALE_MS
 
-        # spinning in the chair beats everything else, hands included.
-        if self.is_spinning(now):
-            return "spinCat"
-
         if not hand_result.hand_landmarks:
-            # no hands: side-eye and huh are both face-only poses, and
-            # BOTH require no hands visible - mouthOpenCat moved out of
-            # this branch entirely (see below), specifically so it can
-            # never clash with huhCat: huhCat needs mouth-open with no
-            # hand, mouthOpenCat now needs mouth-open WITH a hand. They're
-            # mutually exclusive by construction, not by priority-ordering.
+            # no hands: side-eye and huh are both face-only poses.
             if (
                 face_is_fresh
                 and self.last_jaw_open_debug > HUH_JAW_THRESHOLD
@@ -449,99 +414,13 @@ class GestureState:
                 return "sideEyeDownCat"
             return "default"
 
-        # mouthOpenCat: mouth open AND a hand visible somewhere in frame -
-        # any hand shape counts, this isn't about what the hand is doing,
-        # just that one's present. Checked before the hand-shape-specific
-        # branches below so an open mouth with a hand up (eating, talking
-        # with your hands, etc.) reads as this rather than whatever shape
-        # the hand happens to be making.
-        if face_is_fresh and self.last_jaw_open_debug > MOUTH_OPEN_JAW_THRESHOLD:
-            return "mouthOpenCat"
-
         hands = [classify_hand(lm) for lm in hand_result.hand_landmarks]
 
-        if len(hands) == 2:
-            if is_pointing(hands[0]) and is_pointing(hands[1]):
-                avg_scale = (hands[0]["handScale"] + hands[1]["handScale"]) / 2
-                tip_gap = dist(hands[0]["indexTip"], hands[1]["indexTip"]) / avg_scale
-                if tip_gap < 1.4:
-                    return "twoFingersTogether"
-
-            if face_is_fresh:
-                mouth_center, face_width, _, _, _ = self.last_face
-                near_face = all(
-                    dist(h["palmCenter"], mouth_center) / face_width < 2.2 for h in hands
-                )
-                if near_face:
-                    head_top_y = mouth_center[1] - face_width * 1.1
-                    both_above_head = all(h["palmCenter"][1] < head_top_y for h in hands)
-                    if both_above_head:
-                        return "twoHandsOnHead"
-                    # crashOutCat requires both hands to actually be
-                    # clenched fists - an open hand near the face falls
-                    # through instead of getting swallowed by this.
-                    both_fists = all(h["curledCount"] == 4 for h in hands)
-                    if both_fists:
-                        return "crashOutCat"
-
-            # danceCat: both hands showing open palms (fingers spread - the
-            # practical proxy for "palm facing camera", since MediaPipe
-            # doesn't give hand orientation directly), with one hand near
-            # the TOP of the screen and the other near the BOTTOM -
-            # absolute frame position, not relative to your face, and it
-            # doesn't matter which hand is on top. Untested against real
-            # numbers - watch each hand's y position and adjust
-            # DANCE_TOP_ZONE_Y/DANCE_BOTTOM_ZONE_Y if the zones feel wrong.
-            both_open = all(h["curledCount"] == 0 for h in hands)
-            if both_open:
-                ys = sorted(h["palmCenter"][1] for h in hands)
-                one_near_top = ys[0] < DANCE_TOP_ZONE_Y
-                one_near_bottom = ys[1] > DANCE_BOTTOM_ZONE_Y
-                if one_near_top and one_near_bottom:
-                    return "danceCat"
-
-        h = hands[0]
-
-        if h["curledCount"] == 4:
+        if any(h["curledCount"] == 4 for h in hands):
             return "fist"
 
-        if h["thumbOut"] and h["pinkyUp"] and not h["indexUp"] and not h["middleUp"] and not h["ringUp"]:
-            return "rockstar"
-
-        # shhh / one-finger-up: a single extended index finger is a very
-        # specific shape (shhh in particular = fingertip right on the
-        # mouth), so it must be checked before the broader hand-covering-
-        # face test below - otherwise a shhh pose (finger near the mouth)
-        # gets swallowed by the "any hand near the face" check.
-        if h["indexUp"] and not h["middleUp"] and not h["ringUp"] and not h["pinkyUp"]:
-            if face_is_fresh:
-                mouth_center, face_width, _, _, _ = self.last_face
-                d = dist(h["indexTip"], mouth_center) / face_width
-                if d < 0.55:
-                    return "shhh"
-            return "oneFingerUp"
-
-        # hand covering face: the one hand we see sits roughly where the
-        # face last was. Wider tolerance if the face detector has fully
-        # lost the face (strong evidence of a real occlusion); tighter if
-        # it's still partially tracking through the fingers.
-        if face_is_fresh:
-            mouth_center, face_width, _, _, _ = self.last_face
-            d = dist(h["palmCenter"], mouth_center) / face_width
-            threshold = (
-                HAND_COVER_FACE_DIST_FACE_LOST
-                if not self.face_seen_this_frame
-                else HAND_COVER_FACE_DIST_FACE_SEEN
-            )
-            if d < threshold:
-                return "handCoverFace"
-
-        # open palm held out, not near the face
-        if h["curledCount"] == 0:
-            return "handStretchedOut"
-
-        # hands are up but not making a specific shape - still allow a
-        # strong side-eye read to win over an ambiguous hand pose.
+        # hand up but not a fist - still allow a strong side-eye read to
+        # win over an ambiguous hand pose.
         if face_is_fresh and abs(self.last_face[3]) > SIDE_EYE_YAW_DEG:
             return "sideEyeCat"
 
