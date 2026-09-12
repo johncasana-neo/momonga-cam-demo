@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
 <title>Gesture Meme Detector</title>
 <style>
   html, body {
@@ -12,14 +13,21 @@
   }
   .split {
     display: flex;
+    flex-direction: row;
     width: 100vw;
     height: 100vh;
+    height: 100dvh;
   }
   .pane {
     flex: 1;
     position: relative;
     overflow: hidden;
     background: #000;
+  }
+  @media (orientation: portrait) {
+    .split {
+      flex-direction: column;
+    }
   }
   #video {
     width: 100%;
